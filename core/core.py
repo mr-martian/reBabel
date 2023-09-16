@@ -5,6 +5,7 @@ import sqlite3 as sql # definitely not permanent
 import os.path
 import datetime
 import json
+from pathlib import Path
 
 app = Flask('core')
 
@@ -81,28 +82,18 @@ parent INTEGER,
 parent_type TEXT,
 child INTEGER,
 child_type TEXT,
-primary INTEGER,
+isprimary INTEGER,
 active INTEGER,
 date TEXT)''')
     return con, cur
 
-def get_db(projectid):
-    pth = get_path(projectid, 'data.db')
-    if os.path.exists(pth):
-        con = sql.connect(pth)
-        cur = con.cursor()
-        return con, cur
-    else:
-        return create_db(pth)
-
-def get_object(projectid, objectid, features=None, reduced=False):
+def get_object(cur, objectid, features=None, reduced=False):
     # TODO: features is currently expected to be of the form
     # ['{tier}:{feat}', ...]
     # but we might want to further specify the unit type
     # and also whether reference features should be copied in
     # or whether they're referring to a unit that's near enough
     # that just the ID is sufficient
-    con, cur = get_db(projectid)
     cur.execute('SELECT type FROM objects WHERE id = ? AND active = 1;', [objectid])
     result = cur.fetchone()
     if result is None:
@@ -138,8 +129,7 @@ def get_object(projectid, objectid, features=None, reduced=False):
             else:
                 val = v
                 if typ == 'ref':
-                    val = get_object(projectid, v,
-                                     features=features, reduced=reduced)
+                    val = get_object(cur, v, features=features, reduced=reduced)
                 elif typ == 'bool':
                     val = bool(v)
                 if val is None:
@@ -150,7 +140,7 @@ def get_object(projectid, objectid, features=None, reduced=False):
                     'value': val,
                 }
     children = {}
-    qr = '''SELECT relations.child, relations.child_type, relations.primary
+    qr = '''SELECT relations.child, relations.child_type, relations.isprimary
 FROM relations
 INNER JOIN objects ON relations.child = objects.id
 WHERE relations.active = 1 AND objects.active = 1 AND relations.parent = ?'''
@@ -159,7 +149,7 @@ WHERE relations.active = 1 AND objects.active = 1 AND relations.parent = ?'''
         if t not in children:
             children[t] = []
         if p == 1:
-            children[t].append(get_object(projectid, c,
+            children[t].append(get_object(cur, c,
                                           features=features, reduced=reduced))
         else:
             children[t].append(c)
@@ -173,33 +163,65 @@ WHERE relations.active = 1 AND objects.active = 1 AND relations.parent = ?'''
 
 def check_args(dct, *checks):
     for c in checks:
-        if c[0] not in request.args:
-            return {'error', f'{c[1]} is required'}, 400
+        if c[0] not in request.json:
+            return {'error': f'{c[1]} is required'}, 400
         if len(c) > 2:
             try:
-                dct[c[0]] = c[2](request.args[c[0]])
+                dct[c[0]] = c[2](request.json[c[0]])
             except:
                 return {'error': f'invalid {c[1]}'}, 400
         else:
-            dct[c[0]] = request.args[c[0]]
+            dct[c[0]] = request.json[c[0]]
 
-@app.route('/get', methods=['GET'])
+@app.route('/createProject', methods=['POST'])
+def create_project():
+    d = {}
+    r = check_args(d, ('project', 'project id'))
+    if r is not None:
+        return r
+    pth = get_path(d['project'], 'data.db')
+    Path(os.path.dirname(pth)).mkdir(parents=True, exist_ok=True)
+    if os.path.exists(pth):
+        return {'error': 'project already exists'}, 400
+    create_db(pth)
+    return {'message': 'created project '+d['project']}
+
+@app.route('/createUnit', methods=['POST'])
+def create_unit():
+    d = {}
+    r = check_args(d, ('project', 'project id'), ('type', 'unit type'))
+    if r is not None:
+        return r
+    pth = get_path(d['project'], 'data.db')
+    con = sql.connect(pth)
+    cur = con.cursor()
+    ts = datetime.datetime.now().strftime(TIME_FORMAT)
+    cur.execute('INSERT INTO objects(type, created, active) VALUES(?, ?, ?)',
+                (d['type'], ts, 1))
+    con.commit()
+    return {'id': cur.lastrowid}
+
+@app.route('/get', methods=['POST'])
 def get_unit():
     d = {}
     r = check_args(d, ('project', 'project id'), ('item', 'item id', int))
     if r is not None:
         return r
-    obj = get_object(d['project'], d['item'])
+    pth = get_path(d['project'], 'data.db')
+    if not os.path.exists(pth):
+        return {'error': 'project does not exist'}, 404
+    con = sql.connect(pth)
+    cur = con.cursor()
+    obj = get_object(cur, d['item'])
     if obj is None:
         return {'error': 'not found'}, 404
     return obj
 
-@app.route('/setFeature', methods=['GET'])
+@app.route('/setFeature', methods=['POST'])
 def set_feature():
     d = {}
     r = check_args(d, ('project', 'project id'), ('item', 'item id', int),
-                   ('features', 'feature list', json.loads),
-                   ('user', 'username'),
+                   ('features', 'feature list'), ('user', 'username'),
                    ('confidence', 'confidence score', float))
     if r is not None:
         return r
@@ -228,11 +250,15 @@ def set_feature():
         else:
             return {'error': 'invalid feature list'}, 400
     ts = datetime.datetime.now().strftime(TIME_FORMAT)
+    # TODO: validate that project exists
+    pth = get_path(d['project'], 'data.db')
+    con = sql.connect(pth)
+    cur = con.cursor()
     update_count = 0
     for typ in feats:
         if not feats[typ]:
             continue
-        qr = 'UPDATE %s_features SET active = 0 WHERE id = ? AND feature IN (%s)' % (typ, ', '.join('?' for _ in str_feats))
+        qr = 'UPDATE %s_features SET active = 0 WHERE id = ? AND feature IN (%s)' % (typ, ', '.join('?' for _ in feats[typ]))
         cur.execute(qr, [d['item']] + [f['f'] for f in feats[typ]])
         for f in feats[typ]:
             cur.execute(
@@ -251,4 +277,5 @@ VALUES (?, ?, ?, ?, ?, ?, ?)
                 ]
             )
             update_count += 1
+    con.commit()
     return {'updates': update_count}
