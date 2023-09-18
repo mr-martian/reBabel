@@ -19,73 +19,66 @@ TIME_FORMAT = '%Y-%m-%d %H:%M:%S'
 def get_path(projectid, fname):
     return os.path.join(PROJECT_DIR, f'{projectid}/', fname)
 
-# features for all units:
-# meta:active - to store creation/deletion times and users
-# meta:next, meta:prev - for navigation, always returned by ID
-
-def create_db(pth):
-    con = sql.connect(pth)
-    cur = con.cursor()
-    # TODO: created as timestamp and active as bool
-    cur.execute('''CREATE TABLE objects(
-id INTEGER PRIMARY KEY,
-type TEXT,
-created TEXT,
-active INTEGER)''')
-    # do these need primary keys of their own?
-    cur.execute('''CREATE TABLE int_features(
-id INTEGER,
-feature TEXT,
-value INTEGER,
-user TEXT,
-confidence INTEGER,
-date TEXT,
-probability REAL,
-active INTEGER)''')
-    cur.execute('''CREATE TABLE bool_features(
-id INTEGER,
-feature TEXT,
-value INTEGER,
-user TEXT,
-confidence INTEGER,
-date TEXT,
-probability REAL,
-active INTEGER)''')
-    # I wonder if there would be any benefit to having a separate
-    # table for categorical features so that we could restrict the
-    # column size?
-    cur.execute('''CREATE TABLE str_features(
-id INTEGER,
-feature TEXT,
-value TEXT,
-user TEXT,
-confidence INTEGER,
-date TEXT,
-probability REAL,
-active INTEGER)''')
-    # maybe we should drop reference features and just have links?
-    # or is it beneficial to have an internal distiction between
-    # parent-child relationships and others?
-    cur.execute('''CREATE TABLE ref_features(
-id INTEGER,
-feature TEXT,
-value INTEGER,
-user TEXT,
-confidence INTEGER,
-date TEXT,
-probability REAL,
-active INTEGER)''')
-    # types are redundant with objects table, but it might simplify some
-    # queries to duplicate that information (and it's not too much)
-    cur.execute('''CREATE TABLE relations(
-parent INTEGER,
-parent_type TEXT,
-child INTEGER,
-child_type TEXT,
-isprimary INTEGER,
-active INTEGER,
-date TEXT)''')
-    return con, cur
+NEW_DB_SCRIPT = '''
+BEGIN;
+-- TODO: created as timestamp and active as bool
+CREATE TABLE objects(id INTEGER PRIMARY KEY,
+                     type TEXT,
+                     created TEXT,
+                     active INTEGER);
+-- do these need primary keys of their own?
+CREATE TABLE tiers(tier TEXT,
+                   feature TEXT,
+                   unittype TEXT,
+                   valuetype TEXT);
+CREATE TABLE int_features(id INTEGER,
+                          feature TEXT,
+                          value INTEGER,
+                          user TEXT,
+                          confidence INTEGER,
+                          date TEXT,
+                          probability REAL,
+                          active INTEGER);
+CREATE TABLE bool_features(id INTEGER,
+                           feature TEXT,
+                           value INTEGER,
+                           user TEXT,
+                           confidence INTEGER,
+                           date TEXT,
+                           probability REAL,
+                           active INTEGER);
+-- I wonder if there would be any benefit to having a separate table for
+-- categorical features so that we could restrict the column size?
+CREATE TABLE str_features(id INTEGER,
+                          feature TEXT,
+                          value TEXT,
+                          user TEXT,
+                          confidence INTEGER,
+                          date TEXT,
+                          probability REAL,
+                          active INTEGER);
+-- maybe we should drop reference features and just have links?
+-- or is it beneficial to have an internal distiction between
+-- parent-child relationships and others?
+CREATE TABLE ref_features(id INTEGER,
+                          feature TEXT,
+                          value INTEGER,
+                          user TEXT,
+                          confidence INTEGER,
+                          date TEXT,
+                          probability REAL,
+                          active INTEGER);
+-- types are redundant with objects table, but it might simplify some
+-- queries to duplicate that information (and it's not too much)
+CREATE TABLE relations(parent INTEGER,
+                       parent_type TEXT,
+                       child INTEGER,
+                       child_type TEXT,
+                       isprimary INTEGER,
+                       active INTEGER,
+                       date TEXT);
+COMMIT;
+'''
 
 def get_object(cur, objectid, features=None, reduced=False):
     # TODO: features is currently expected to be of the form
@@ -183,8 +176,25 @@ def create_project():
     Path(os.path.dirname(pth)).mkdir(parents=True, exist_ok=True)
     if os.path.exists(pth):
         return {'error': 'project already exists'}, 400
-    create_db(pth)
+    con = sql.connect(pth)
+    con.executescript(NEW_DB_SCRIPT)
     return {'message': 'created project '+d['project']}
+
+@app.post('/createType')
+def create_type():
+    d = {}
+    r = check_args(d, ('project', 'project id'), ('type', 'unit type'))
+    if r is not None:
+        return r
+    pth = get_path(d['project'], 'data.db')
+    con = sql.connect(pth)
+    cur = con.cursor()
+    cur.execute('SELECT * FROM tiers WHERE unittype = ? LIMIT 1', (d['type'],))
+    if cur.fetchone() is not None:
+        return {'error': 'type already exists'}, 400
+    cur.execute('INSERT INTO tiers(tier, feature, unittype, valuetype) VALUES(?, ?, ?, ?)', ('meta', 'active', d['type'], 'bool'))
+    con.commit()
+    return {'message': 'created unit type '+d['type']}
 
 @app.route('/createUnit', methods=['POST'])
 def create_unit():
@@ -195,11 +205,19 @@ def create_unit():
     pth = get_path(d['project'], 'data.db')
     con = sql.connect(pth)
     cur = con.cursor()
+    cur.execute('SELECT * FROM tiers WHERE unittype = ? LIMIT 1', (d['type'],))
+    if cur.fetchone() is None:
+        return {'error': 'unknown unit type'}, 400
     ts = datetime.datetime.now().strftime(TIME_FORMAT)
     cur.execute('INSERT INTO objects(type, created, active) VALUES(?, ?, ?)',
                 (d['type'], ts, 1))
+    uid = cur.lastrowid
+    # TODO: assumes new units are unconfirmed, but would unconfirmed units
+    # generally come from suggestions and thus this API should assume that
+    # new units are confirmed?
+    cur.execute('INSERT INTO bool_features(id, feature, value, date, active) VALUES (?, ?, ?, ?, ?)', (uid, 'meta:active', 0, ts, 1))
     con.commit()
-    return {'id': cur.lastrowid}
+    return {'id': uid}
 
 @app.route('/get', methods=['POST'])
 def get_unit():
@@ -232,28 +250,33 @@ def set_feature():
         'str': [],
         'int': [],
         'bool': [],
+        'ref': [],
     }
-    for f in d['features']:
-        if sorted(f.keys()) != expected_keys:
-            return {'error': 'invalid feature list'}, 400
-        # TODO: we should probably be loading a project config file
-        # to get the types of these features, since we can't perfectly
-        # distinguish the feature types based on JSON datatype alone
-        # (also error checking would be good)
-        feat = f'{f["tier"]}:{f["value"]}'
-        if isinstance(f['value'], str):
-            feats['str'].append({'f': feat, 'v': f['value']})
-        elif isinstance(f['value'], int):
-            feats['int'].append({'f': feat, 'v': f['value']})
-        elif isinstance(f['value'], bool):
-            feats['bool'].append({'f': feat, 'v': int(f['value'])})
-        else:
-            return {'error': 'invalid feature list'}, 400
-    ts = datetime.datetime.now().strftime(TIME_FORMAT)
     # TODO: validate that project exists
     pth = get_path(d['project'], 'data.db')
     con = sql.connect(pth)
     cur = con.cursor()
+    cur.execute('SELECT type FROM objects WHERE id = ?', (d['item'],))
+    typ = cur.fetchone()
+    if typ is None:
+        return {'error': 'item does not exist'}, 404
+    for f in d['features']:
+        if sorted(f.keys()) != expected_keys:
+            return {'error': 'invalid feature list'}, 400
+        cur.execute('SELECT valuetype FROM tiers WHERE tier = ? AND feature = ? AND unittype = ?', (f['tier'], f['feature'], typ))
+        vtyp = cur.fetchone()
+        feat = f'{f["tier"]}:{f["feature"]}'
+        if vtyp is None:
+            return {'error': feat+' does not exist for type '+typ}, 404
+        if vtyp == 'str' and isinstance(f['value'], str):
+            feats['str'].append({'f': feat, 'v': f['value']})
+        elif vtyp in ['int', 'ref'] and isinstance(f['value'], int):
+            feats[vtyp].append({'f': feat, 'v': f['value']})
+        elif vtyp == 'bool' and isinstance(f['value'], bool):
+            feats['bool'].append({'f': feat, 'v': int(f['value'])})
+        else:
+            return {'error': 'invalid feature list'}, 400
+    ts = datetime.datetime.now().strftime(TIME_FORMAT)
     update_count = 0
     for typ in feats:
         if not feats[typ]:
