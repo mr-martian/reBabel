@@ -240,7 +240,7 @@ def set_feature():
     d = {}
     r = check_args(d, ('project', 'project id'), ('item', 'item id', int),
                    ('features', 'feature list'), ('user', 'username'),
-                   ('confidence', 'confidence score', float))
+                   ('confidence', 'confidence score', int))
     if r is not None:
         return r
     expected_keys = ['feature', 'tier', 'value']
