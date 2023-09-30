@@ -64,7 +64,8 @@ def view_project(request, project, access=None):
     return render(request, 'app/view_project.html',
                   {'project': project, 'types': types})
 
-API_URL = 'http://127.0.0.1:9000/' # TODO
+#API_URL = 'http://127.0.0.1:9000/' # TODO
+from secret import API_URL
 
 @check_project
 def list_types(request, project, access=None, unittype='document'):
