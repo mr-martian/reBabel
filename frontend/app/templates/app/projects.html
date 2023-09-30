@@ -1,0 +1,19 @@
+{% extends "base/base.html" %}
+
+{% block content %}
+
+<h3>Your Projects</h3>
+<ul>
+  {% for p in owned %}
+  <li><a href="{% url 'app:view_project' p.id %}">{{p.name}}</a></li>
+  {% endfor %}
+</ul>
+
+<h3>Projects You Have Access To</h3>
+<ul>
+  {% for a in access %}
+  <li><a href="{% url 'app:view_project' a.project.id %}">{{a.project.name}}</a></li>
+  {% endfor %}
+</ul>
+
+{% endblock %}

@@ -1,0 +1,15 @@
+{% extends "base/base.html" %}
+
+{% block content %}
+
+<h2>Every <i>{{type}}</i> in <i>{{project.name}}</i></h2>
+
+<ul>
+  {% for u in units %}
+  <li><a href="{% url 'app:view_unit' project.id u.id %}">{{u.value}}</a></li>
+  {% endfor %}
+</ul>
+
+<p><a href="{% url 'app:create_unit' project.id type %}">Add {{type}}</a></p>
+
+{% endblock %}

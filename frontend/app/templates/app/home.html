@@ -1,0 +1,13 @@
+{% extends "base/base.html" %}
+
+{% block content %}
+
+<p>Hi. Welcome to this very incomplete annotation tool.</p>
+
+{% if user.is_authenticated %}
+<p>You can view your list of projects <a href="{% url 'app:projects' %}">here</a>. (Probably that list should just show up here eventually.)</p>
+{% else %}
+<p>You can <a href="{% url 'login' %}">log in</a> or you can contact Daniel to ask for an account.</p>
+{% endif %}
+
+{% endblock %}

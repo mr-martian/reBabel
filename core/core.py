@@ -4,6 +4,7 @@ from flask import Flask, request
 import sqlite3 as sql # definitely not permanent
 import os.path
 import datetime
+import functools
 import json
 from pathlib import Path
 
@@ -16,15 +17,19 @@ PROJECT_DIR = os.path.join(
 )
 TIME_FORMAT = '%Y-%m-%d %H:%M:%S'
 
+def now():
+    return datetime.datetime.now().strftime(TIME_FORMAT)
+
 def get_path(projectid, fname):
     return os.path.join(PROJECT_DIR, f'{projectid}/', fname)
 
 NEW_DB_SCRIPT = '''
 BEGIN;
--- TODO: created as timestamp and active as bool
+-- TODO: created and modified as timestamp and active as bool
 CREATE TABLE objects(id INTEGER PRIMARY KEY,
                      type TEXT,
                      created TEXT,
+                     modified TEXT,
                      active INTEGER);
 -- do these need primary keys of their own?
 CREATE TABLE tiers(tier TEXT,
@@ -87,11 +92,12 @@ def get_object(cur, objectid, features=None, reduced=False):
     # and also whether reference features should be copied in
     # or whether they're referring to a unit that's near enough
     # that just the ID is sufficient
-    cur.execute('SELECT type FROM objects WHERE id = ? AND active = 1;', [objectid])
+    cur.execute('SELECT type, modified FROM objects WHERE id = ? AND active = 1;', [objectid])
     result = cur.fetchone()
     if result is None:
         return None
     otype = result[0]
+    modified = result[1]
     layers = {}
     feats_to_sort = set()
     where = ''
@@ -150,155 +156,251 @@ WHERE relations.active = 1 AND objects.active = 1 AND relations.parent = ?'''
     return {
         'type': otype,
         'id': objectid,
+        'modified': modified,
         'layers': layers,
         'children': children,
     }
 
-def check_args(dct, *checks):
-    for c in checks:
-        if c[0] not in request.json:
-            return {'error': f'{c[1]} is required'}, 400
-        if len(c) > 2:
-            try:
-                dct[c[0]] = c[2](request.json[c[0]])
-            except:
-                return {'error': f'invalid {c[1]}'}, 400
-        else:
-            dct[c[0]] = request.json[c[0]]
+def get_unit_type(cur, uid):
+    cur.execute('SELECT type FROM objects WHERE id = ?', (uid,))
+    t = cur.fetchone()
+    if t is not None:
+        return t[0]
+    return None
 
-@app.route('/createProject', methods=['POST'])
-def create_project():
-    d = {}
-    r = check_args(d, ('project', 'project id'))
-    if r is not None:
-        return r
-    pth = get_path(d['project'], 'data.db')
+class Args:
+    def __init__(self, required):
+        self.now = now()
+        self.error = None
+        if request.json is None:
+            self.error = ('invalid JSON', 400)
+        else:
+            self.data = request.json
+            for check in required:
+                val = request.json[check[0]]
+                if check[0] not in request.json:
+                    self.error = (f'{check[1]} is required', 400)
+                    break
+                if len(check) > 2:
+                    typ = check[2]
+                    if isinstance(typ, type):
+                        if not isinstance(val, typ):
+                            self.error = (f'invalid {check[1]}', 400)
+                            break
+                    elif typ == 'project':
+                        pth = get_path(val, 'data.db')
+                        if not os.path.exists(pth):
+                            self.error = ('project does not exist', 404)
+                            break
+                        self.con = sql.connect(pth)
+                        self.cur = self.con.cursor()
+                    elif typ == 'unit':
+                        if not isinstance(val, int):
+                            self.error = (f'invalid {check[1]}', 400)
+                            break
+                        utyp = get_unit_type(self.cur, val)
+                        if utyp is None:
+                            self.error = (f'{check[1]} does not exist', 404)
+                            break
+                        self.__dict__[check[0]+'_type'] = utyp
+                self.__dict__[check[0]] = val
+    def modify(self, uid):
+        self.cur.execute('UPDATE objects SET modified = ? WHERE id = ?',
+                         (self.now, uid))
+
+def json_args(*checks):
+    def dec(fn):
+        @functools.wraps(fn)
+        def _fn():
+            a = Args(checks)
+            if a.error is not None:
+                return a.error
+            return fn(a)
+        return _fn
+    return dec
+
+@app.post('/createProject')
+@json_args(('project', 'project id', str))
+def create_project(args):
+    pth = get_path(args.project, 'data.db')
     Path(os.path.dirname(pth)).mkdir(parents=True, exist_ok=True)
     if os.path.exists(pth):
         return {'error': 'project already exists'}, 400
     con = sql.connect(pth)
     con.executescript(NEW_DB_SCRIPT)
-    return {'message': 'created project '+d['project']}
+    return {'message': 'created project '+args.project}
 
 @app.post('/createType')
-def create_type():
-    d = {}
-    r = check_args(d, ('project', 'project id'), ('type', 'unit type'))
-    if r is not None:
-        return r
-    pth = get_path(d['project'], 'data.db')
-    con = sql.connect(pth)
-    cur = con.cursor()
-    cur.execute('SELECT * FROM tiers WHERE unittype = ? LIMIT 1', (d['type'],))
-    if cur.fetchone() is not None:
+@json_args(('project', 'project id', 'project'), ('type', 'unit type', str))
+def create_type(args):
+    args.cur.execute('SELECT * FROM tiers WHERE unittype = ? LIMIT 1', (args.type,))
+    if args.cur.fetchone() is not None:
         return {'error': 'type already exists'}, 400
-    cur.execute('INSERT INTO tiers(tier, feature, unittype, valuetype) VALUES(?, ?, ?, ?)', ('meta', 'active', d['type'], 'bool'))
-    con.commit()
-    return {'message': 'created unit type '+d['type']}
+    args.cur.execute('INSERT INTO tiers(tier, feature, unittype, valuetype) VALUES(?, ?, ?, ?)', ('meta', 'active', args.type, 'bool'))
+    args.con.commit()
+    return {'message': 'created unit type '+args.type}
 
-@app.route('/createUnit', methods=['POST'])
-def create_unit():
-    d = {}
-    r = check_args(d, ('project', 'project id'), ('type', 'unit type'))
-    if r is not None:
-        return r
-    pth = get_path(d['project'], 'data.db')
-    con = sql.connect(pth)
-    cur = con.cursor()
-    cur.execute('SELECT * FROM tiers WHERE unittype = ? LIMIT 1', (d['type'],))
-    if cur.fetchone() is None:
+def check_meta_field(feature, vtype):
+    if feature == 'parent' and vtype == 'ref':
+        return True
+    if feature == 'index' and vtype == 'int':
+        return True
+    return False
+
+@app.post('/createFeature')
+@json_args(('project', 'project id', 'project'), ('unittype', 'unit type', str),
+           ('tier', 'tier name', str), ('feature', 'feature name', str),
+           ('valuetype', 'value type', str))
+def create_feature(args):
+    if args.valuetype not in ['int', 'bool', 'str', 'ref']:
+        return {'error': 'invalid value type'}, 400
+    if args.tier == 'meta':
+        if not check_meta_field(args.feature, args.valuetype):
+            return {'error': 'invalid meta field'}, 400
+    args.cur.execute('SELECT * FROM tiers WHERE unittype = ? LIMIT 1', (args.unittype,))
+    if args.cur.fetchone() is None:
+        return {'error': 'unit type does not exist'}, 400
+    args.cur.execute('INSERT INTO tiers(tier, feature, unittype, valuetype) VALUES(?, ?, ?, ?)', (args.tier, args.feature, args.unittype, args.valuetype))
+    args.con.commit()
+    return {'message': f'created feature {args.tier}:{args.feature} for unit type {args.unittype}'}
+
+@app.post('/createUnit')
+@json_args(('project', 'project id', 'project'), ('type', 'unit type', str))
+def create_unit(args):
+    args.cur.execute('SELECT * FROM tiers WHERE unittype = ? LIMIT 1', (args.type,))
+    if args.cur.fetchone() is None:
         return {'error': 'unknown unit type'}, 400
-    ts = datetime.datetime.now().strftime(TIME_FORMAT)
-    cur.execute('INSERT INTO objects(type, created, active) VALUES(?, ?, ?)',
-                (d['type'], ts, 1))
-    uid = cur.lastrowid
-    # TODO: assumes new units are unconfirmed, but would unconfirmed units
-    # generally come from suggestions and thus this API should assume that
-    # new units are confirmed?
-    cur.execute('INSERT INTO bool_features(id, feature, value, date, active) VALUES (?, ?, ?, ?, ?)', (uid, 'meta:active', 0, ts, 1))
-    con.commit()
+    args.cur.execute('INSERT INTO objects(type, created, modified, active) VALUES(?, ?, ?, ?)',
+                     (args.type, args.now, args.now, 1))
+    uid = args.cur.lastrowid
+    # set as confirmed if we got a username in the input
+    if 'user' in args.data:
+        args.cur.execute(
+            'INSERT INTO bool_features(id, feature, value, date, active, user) VALUES (?, ?, ?, ?, ?, ?)',
+            (uid, 'meta:active', 1, args.now, 1, args.data['user'])
+        )
+    else:
+        args.cur.execute('INSERT INTO bool_features(id, feature, value, date, active) VALUES (?, ?, ?, ?, ?)', (uid, 'meta:active', 0, args.now, 1))
+    args.con.commit()
     return {'id': uid}
 
-@app.route('/get', methods=['POST'])
-def get_unit():
-    d = {}
-    r = check_args(d, ('project', 'project id'), ('item', 'item id', int))
-    if r is not None:
-        return r
-    pth = get_path(d['project'], 'data.db')
-    if not os.path.exists(pth):
-        return {'error': 'project does not exist'}, 404
-    con = sql.connect(pth)
-    cur = con.cursor()
-    obj = get_object(cur, d['item'])
+@app.post('/get')
+@json_args(('project', 'project id', 'project'), ('item', 'item id', int))
+def get_unit(args):
+    obj = get_object(args.cur, args.item)
     if obj is None:
         return {'error': 'not found'}, 404
     return obj
 
-@app.route('/setFeature', methods=['POST'])
-def set_feature():
-    d = {}
-    r = check_args(d, ('project', 'project id'), ('item', 'item id', int),
-                   ('features', 'feature list'), ('user', 'username'),
-                   ('confidence', 'confidence score', int))
-    if r is not None:
-        return r
-    expected_keys = ['feature', 'tier', 'value']
-    if not isinstance(d['features'], list):
-        return {'error': 'invalid feature list'}, 400
+@app.post('/setFeature')
+@json_args(('project', 'project id', 'project'), ('item', 'item id', 'unit'),
+           ('features', 'feature list', list), ('user', 'username', str),
+           ('confidence', 'confidence score', int))
+def set_feature(args):
     feats = {
         'str': [],
         'int': [],
         'bool': [],
         'ref': [],
     }
-    # TODO: validate that project exists
-    pth = get_path(d['project'], 'data.db')
-    con = sql.connect(pth)
-    cur = con.cursor()
-    cur.execute('SELECT type FROM objects WHERE id = ?', (d['item'],))
-    typ = cur.fetchone()
-    if typ is None:
-        return {'error': 'item does not exist'}, 404
-    for f in d['features']:
+    expected_keys = ['feature', 'tier', 'value']
+    for f in args.features:
         if sorted(f.keys()) != expected_keys:
             return {'error': 'invalid feature list'}, 400
-        cur.execute('SELECT valuetype FROM tiers WHERE tier = ? AND feature = ? AND unittype = ?', (f['tier'], f['feature'], typ))
-        vtyp = cur.fetchone()
+        args.cur.execute('SELECT valuetype FROM tiers WHERE tier = ? AND feature = ? AND unittype = ?', (f['tier'], f['feature'], args.item_type))
+        vtyp = args.cur.fetchone()
         feat = f'{f["tier"]}:{f["feature"]}'
         if vtyp is None:
-            return {'error': feat+' does not exist for type '+typ}, 404
-        if vtyp == 'str' and isinstance(f['value'], str):
+            return {'error': feat+' does not exist for type '+args.item_type}, 404
+        if vtyp[0] == 'str' and isinstance(f['value'], str):
             feats['str'].append({'f': feat, 'v': f['value']})
-        elif vtyp in ['int', 'ref'] and isinstance(f['value'], int):
+        elif vtyp[0] in ['int', 'ref'] and isinstance(f['value'], int):
             feats[vtyp].append({'f': feat, 'v': f['value']})
-        elif vtyp == 'bool' and isinstance(f['value'], bool):
+        elif vtyp[0] == 'bool' and isinstance(f['value'], bool):
             feats['bool'].append({'f': feat, 'v': int(f['value'])})
         else:
             return {'error': 'invalid feature list'}, 400
-    ts = datetime.datetime.now().strftime(TIME_FORMAT)
     update_count = 0
     for typ in feats:
         if not feats[typ]:
             continue
         qr = 'UPDATE %s_features SET active = 0 WHERE id = ? AND feature IN (%s)' % (typ, ', '.join('?' for _ in feats[typ]))
-        cur.execute(qr, [d['item']] + [f['f'] for f in feats[typ]])
+        args.cur.execute(qr, [args.item] + [f['f'] for f in feats[typ]])
         for f in feats[typ]:
-            cur.execute(
+            args.cur.execute(
                 '''
 INSERT INTO %s_features(id, feature, value, user, confidence, date, active)
 VALUES (?, ?, ?, ?, ?, ?, ?)
 ''' % typ,
                 [
-                    d['item'],       # id
+                    args.item,       # id
                     f['f'],          # feature
                     f['v'],          # value
-                    d['user'],       # user
-                    d['confidence'], # confidence
-                    ts,              # date
+                    args.user,       # user
+                    args.confidence, # confidence
+                    args.now,        # date
                     1,               # active
                 ]
             )
             update_count += 1
-    con.commit()
-    return {'updates': update_count}
+    args.modify(args.item)
+    args.con.commit()
+    return {'updates': update_count, 'time': args.now}
+
+@app.post('/setParent')
+@json_args(('project', 'project id', 'project'), ('parent', 'parent id', 'unit'),
+           ('child', 'child id', 'unit'))
+def set_parent(args):
+    args.cur.execute('UPDATE relations SET active = 0 WHERE parent = ? AND child = ? AND isprimary = 1', (args.parent, args.child))
+    args.cur.execute('INSERT INTO relations(parent, parent_type, child, child_type, isprimary, active, date) VALUES (?, ?, ?, ?, 1, 1, ?)', (args.parent, args.parent_type, args.child, args.child_type, args.now))
+    args.modify(args.parent)
+    args.modify(args.child)
+    args.con.commit()
+    return {'message': 'parent set', 'time': args.now}
+
+@app.post('/addParent')
+@json_args(('project', 'project id', 'project'), ('parent', 'parent id', 'unit'),
+           ('child', 'child id', 'unit'))
+def add_parent(args):
+    args.cur.execute('INSERT INTO relations(parent, parent_type, child, child_type, isprimary, active, date) VALUES (?, ?, ?, ?, 0, 1, ?)', (args.parent, args.parent_type, args.child, args.child_type, args.now))
+    args.modify(args.parent)
+    args.modify(args.child)
+    args.con.commit()
+    return {'message': 'parent added', 'time': args.now}
+
+@app.post('/removeParent')
+@json_args(('project', 'project id', 'project'), ('parent', 'parent id', 'unit'),
+           ('child', 'child id', 'unit'))
+def rem_parent(args):
+    args.cur.execute('UPDATE relations SET active = 0 WHERE parent = ? AND child = ?', (args.parent, args.child))
+    args.modify(args.parent)
+    args.modify(args.child)
+    return {'message': 'parent removed', 'time': args.now}
+
+@app.post('/listType')
+@json_args(('project', 'project id', 'project'), ('type', 'unit type', str),
+           ('tier', 'tier name', str), ('feature', 'feature name', str))
+def list_type(args):
+    args.cur.execute('SELECT valuetype FROM tiers WHERE unittype = ? AND tier = ? AND feature = ?', (args.type, args.tier, args.feature))
+    vt = args.cur.fetchone()
+    if vt is None:
+        return {'error': 'unit type or feature does not exist'}, 400
+    args.cur.execute('SELECT id FROM objects WHERE type = ? AND active = 1', (args.type,))
+    dct = {k[0]:None for k in args.cur.fetchall()}
+    if not dct:
+        return {'units': []}
+    qs = ', '.join('?' for _ in range(len(dct)))
+    args.cur.execute(f'SELECT id, value FROM {vt[0]}_features WHERE id IN ({qs}) AND feature = ? AND user IS NOT NULL AND active = 1',
+                     list(dct.keys()) + [args.tier+':'+args.feature])
+    for i, v in args.cur.fetchall():
+        dct[i] = bool(v) if vt[0] == 'bool' else v
+    ls = list(dct.items())
+    ls.sort()
+    return {'units': [{"id": i, "value": v} for i,v in ls]}
+
+@app.post('/modificationTimes')
+@json_args(('project', 'project id', 'project'), ('ids', 'id list', list))
+def modification_times(args):
+    qs = ', '.join('?' for _ in args.ids)
+    args.cur.execute(f'SELECT id, modified FROM objects WHERE id IN ({qs})', args.ids)
+    return dict(args.cur.fetchall())

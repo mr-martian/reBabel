@@ -1,0 +1,17 @@
+{% extends "base/base.html" %}
+
+{% block content %}
+
+<h2>{{project.name}}</h2>
+
+<p>Owner: {{project.owner.first_name}} {{project.owner.last_name}}</p>
+
+<h3>Toplevel Unit Types</h3>
+
+<ul>
+  {% for t in types %}
+  <li><a href="{% url 'app:list_types' project.id t %}">{{t}}</a></li>
+  {% endfor %}
+</ul>
+
+{% endblock %}

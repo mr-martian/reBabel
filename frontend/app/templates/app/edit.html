@@ -1,0 +1,255 @@
+{% extends "base/base.html" %}
+{% load jsonify %}
+
+{% block head %}
+<style>
+  .unit {
+      display: inline-block;
+      border: 1px solid black;
+      padding: 10px;
+      position: relative;
+  }
+  .unit.sentence {
+      display: block;
+  }
+  .feat {
+      padding: 3px;
+  }
+  label {
+      padding-right: 3px;
+  }
+  .tier_meta {
+      display: none;
+  }
+  .add {
+      color: green;
+      font-size: 20px;
+      font-weight: bold;
+      background: lightgrey;
+      text-align: center;
+  }
+  .add-standalone {
+      margin-left: 45%;
+      margin-right: 45%;
+      display: block;
+  }
+  .add-left {
+      position: absolute;
+      top: 50%;
+      left: 0px;
+  }
+  .add-right {
+      position: absolute;
+      top: 50%;
+      right: 0px;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<div id="data">
+  <div id="unit{{unit}}"></div>
+</div>
+
+<script type="text/javascript">
+  var GET_URL = "{% url 'app:get_unit' project.id %}";
+  var SET_URL = "{% url 'app:set_features' project.id %}";
+  var CREATE_URL = "{% url 'app:add_unit' project.id %}";
+  var EDIT_TIME_URL = "{% url 'app:edit_times' project.id %}";
+  var BASE_ID = {{unit}};
+  var ALL_FIELDS = {{project.fields|jsonify}};
+  {% if access %}
+  var READ_FIELDS = {{access.read_fields|jsonify}};
+  var WRITE_FIELDS = {{access.write_fields|jsonify}};
+  {% else %}
+  var READ_FIELDS = true;
+  var WRITE_FIELDS = true;
+  {% endif %}
+  var ALL_VIEWS = {
+      {% for v in views %}
+      "{{v.name}}": {{v.data|jsonify}},
+      {% endfor %}
+  };
+  var AVAILABLE_VIEW = {};
+  var CURRENT_VIEW = "{{default_view.name}}";
+  var UPDATE_TIMES = {};
+
+  function css_escape(s) {
+      // TODO (or should we just restrict what characters can go here?)
+      return s;
+  }
+
+  function get_feat(unit, tier, feat) {
+      if (!unit.layers.hasOwnProperty(tier)) return null;
+      if (!unit.layers[tier].hasOwnProperty(feat)) return null;
+      return unit.layers[tier][feat];
+  }
+
+  function get_feat_val(unit, tier, feat, alt) {
+      let f = get_feat(unit, tier, feat);
+      if (!f.hasOwnProperty('value')) return alt;
+      return f.value;
+  }
+
+  function index_order(unit1, unit2) {
+      return (get_feat_val(unit1, 'meta', 'index', 1000)
+              - get_feat_val(unit2, 'meta', 'index', 1000));
+  }
+
+  function id_order(unit1, unit2) {
+      return unit1.id - unit2.id;
+  }
+
+  var esc_area = document.createElement('textarea');
+  function esc_val(s) {
+      esc_area.textContent = s;
+      return esc_area.innerHTML;
+  }
+
+  function render_feat(spec, feat, uid, fid) {
+      let ret = '<div class="feat tier_'+css_escape(spec.tier)+' feat_'+css_escape(spec.feature)+'">';
+      let eid = 'id="u'+uid+'f'+fid+'" data-unit="'+uid+'" data-tier="'+spec.tier+'" data-feature="'+spec.feature+'"';
+      ret += '<label for="'+eid+'">'+spec.tier + ':' + spec.feature+'</label>';
+      if (feat == null) {
+          ret += '<input type="text" '+eid+'></input>';
+      } else if (feat.hasOwnProperty('value')) {
+          ret += '<input type="text" '+eid+' value="'+esc_val(feat.value)+'"></input>';
+      } else {
+          ret += '<input type="text" '+eid+'></input>';
+      }
+      return ret + '</div>';
+  }
+
+  function render_unit(unit, in_seq) {
+      UPDATE_TIMES[unit.id] = unit.modified;
+      // TODO: some units (e.g. lexemes) will show up more than once,
+      // making html ids not particularly useful
+      let ret = '<div id="unit'+unit.id+'" class="unit '+css_escape(unit.type)+'" data-id="'+unit.id+'">';
+      if (in_seq) {
+          ret += '<span class="add add-left" title="add '+unit.type+'" data-type="'+unit.type+'">+</span>';
+          ret += '<span class="add add-right" title="add '+unit.type+'" data-type="'+unit.type+'">+</span>';
+      }
+      let feats = [];
+      let children = [];
+      let view = ALL_VIEWS[CURRENT_VIEW];
+      if (view.hasOwnProperty(unit.type)) {
+          feats = view[unit.type].features;
+          if (feats == true) {
+              feats = ALL_FIELDS[unit.type].fields;
+          }
+          children = view[unit.type].children;
+      }
+      ret += feats.map((f, i) => render_feat(f, get_feat(unit, f.tier, f.feature), unit.id, i)).join('');
+      for (let c of children) {
+          let chs = [];
+          if (unit.children.hasOwnProperty(c)) {
+              chs = unit.children[c];
+          }
+          if (view[c].hasOwnProperty('sort')) {
+              if (view[c].sort == 'id') {
+                  chs.sort(id_order);
+              } else if (view[c].sort == 'index') {
+                  chs.sort(index_order);
+              }
+          }
+          ret += '<div class="unit-group">';
+          if (chs.length > 0) {
+              ret += chs.map(u => render_unit(u, true)).join('');
+          } else {
+              // TODO: check permissions
+              ret += '<span class="add add-standalone" title="add '+c+'" data-type="'+c+'">+</span>';
+          }
+          ret += '</div>';
+      }
+      ret += '</div>';
+      return ret;
+  }
+
+  function csrf() {
+      let idx = document.cookie.indexOf('csrftoken');
+      if (idx < 0) return '';
+      return document.cookie.substr(idx).split(';')[0].split('=')[1];
+  }
+
+  function post(url, data, cb) {
+      $.ajax({
+          type: 'POST',
+          url: url,
+          data: JSON.stringify(data),
+          dataType: 'json',
+          headers: {'X-CSRFToken': csrf()},
+          success: cb,
+      });
+  }
+
+  function add_unit() {
+      let type = $(this).data('type');
+      let parent = $(this).closest('.unit-group').closest('.unit').data('id');
+      let el = $(this);
+      post(CREATE_URL, {type: type, parent: parent},
+           function(data) {
+               let dv = '<div id="unit'+data.id+'"></div>';
+               if (el.hasClass('add-standalone')) {
+                   el.replaceWith(dv);
+               } else if (el.hasClass('add-left')) {
+                   el.closest('.unit').before(dv);
+               } else if (el.hasClass('add-right')) {
+                   el.closest('.unit').after(dv);
+               }
+               refresh_unit(data.id);
+               el.closest('.unit-group').find('.tier_meta.feat_index').each(
+                   function(i, el) {
+                       $(el).children('input').val(i).change();
+                   });
+           });
+  }
+
+  function change_value() {
+      let e = $(this);
+      post(SET_URL,
+           {
+               item: e.data('unit'),
+               features: [{
+                   tier: e.data('tier'),
+                   feature: e.data('feature'),
+                   value: e.val(),
+               }],
+           },
+           function(data) {
+               // TODO: does this stop us from seeing changes
+               // that happen immediately before ours?
+               UPDATE_TIMES[e.data['item']] = data.time;
+           });
+  }
+
+  function refresh_unit(id) {
+      if (id == null || id == undefined) return;
+      post(GET_URL, {item: id}, function(data) {
+          let el = $('#unit'+id);
+          el.replaceWith(render_unit(data, el.parent().hasClass('unit-group')));
+      });
+  }
+
+  function check_updates() {
+      let ids = $('.unit').map((i, u) => parseInt($(u).data('id'))).get();
+      post(EDIT_TIME_URL, {ids: ids}, function(data) {
+          for (let k in data) {
+              if (UPDATE_TIMES.hasOwnProperty(k) && UPDATE_TIMES[k] == data[k]) {
+                  continue;
+              }
+              // updates UPDATE_TIMES
+              refresh_unit(k);
+          }
+      });
+  }
+
+  $(function() {
+      $(document).on('click', '.add', add_unit);
+      $(document).on('change', 'input', change_value);
+      refresh_unit(BASE_ID);
+      setInterval(check_updates, 60000); // check updates every minute
+  });
+</script>
+
+{% endblock %}

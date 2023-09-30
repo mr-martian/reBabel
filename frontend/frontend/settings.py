@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
 from pathlib import Path
+import secret
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -23,10 +24,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = 'django-insecure-o8m5^^)tztc4u^xeamv6advyhd5r0@5@i*dtpj52xxkr$=6ot6'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = secret.DEBUG
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['localhost', 'annotation.dangswan.com']
 
+ADMINS = secret.ADMINS
 
 # Application definition
 
@@ -37,6 +39,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'app',
 ]
 
 MIDDLEWARE = [
@@ -116,8 +119,17 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/4.2/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'static'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+EMAIL_BACKEND = secret.EMAIL_BACKEND
+EMAIL_USE_TLS = secret.EMAIL_USE_TLS
+EMAIL_HOST = secret.EMAIL_HOST
+EMAIL_PORT = secret.EMAIL_PORT
+EMAIL_HOST_USER = secret.EMAIL_HOST_USER
+EMAIL_HOST_PASSWORD = secret.EMAIL_HOST_PASSWORD
+DEFAULT_FROM_EMAIL = secret.EMAIL_HOST_USER
