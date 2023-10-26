@@ -13,4 +13,4 @@ USER dangswan
 
 WORKDIR /home/dangswan
 
-CMD gunicorn -w 2 core:app -b :9000
+CMD gunicorn --capture-output --error-logfile err.log -w 2 core:app -b :9000
