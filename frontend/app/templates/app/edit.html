@@ -200,7 +200,11 @@
                refresh_unit(data.id);
                el.closest('.unit-group').find('.tier_meta.feat_index').each(
                    function(i, el) {
-                       $(el).children('input').val(i).change();
+                       let e = $(el).children('input');
+                       let old = e.val();
+                       if (old != i.toString()) {
+                           e.val(i).change();
+                       }
                    });
            });
   }
