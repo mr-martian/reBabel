@@ -110,7 +110,11 @@
   function render_feat(spec, feat, uid, fid) {
       let ret = '<div class="feat tier_'+css_escape(spec.tier)+' feat_'+css_escape(spec.feature)+'">';
       let eid = 'id="u'+uid+'f'+fid+'" data-unit="'+uid+'" data-tier="'+spec.tier+'" data-feature="'+spec.feature+'"';
-      ret += '<label for="'+eid+'">'+spec.tier + ':' + spec.feature+'</label>';
+      if (spec.label == undefined) {
+          ret += '<label for="'+eid+'">'+spec.tier + ':' + spec.feature+'</label>';
+      } else {
+          ret += '<label for="'+eid+'">'+spec.label+'</label>';
+      }
       if (feat == null) {
           ret += '<input type="text" '+eid+'></input>';
       } else if (feat.hasOwnProperty('value')) {

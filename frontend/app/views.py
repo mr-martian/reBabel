@@ -2,10 +2,11 @@ from django.shortcuts import render, get_object_or_404, redirect
 from django.http import JsonResponse
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
-from app import models
+from app import models, create_project as cpj
 from functools import wraps
 import json
 from requests import post
+
 
 def json2json(fn):
     @wraps(fn)
@@ -54,6 +55,22 @@ def projects(request):
 def profile(request):
     # TODO
     return redirect('app:projects')
+
+@login_required
+def create_project(request):
+    if request.method == "POST":
+        print(request.GET)
+        projectname = request.POST["projectname"]
+        format = request.POST["format"]
+        cpj.add_new(request, projectname, format)
+        owned = models.Project.objects.filter(owner=request.user)
+        access = models.ProjectAccess.objects.filter(user=request.user)
+        return render(request, 'app/projects.html',
+                  {'owned': owned, 'access': access})
+    else:
+        default_formats = cpj.DATA
+        return render(request, 'app/create_project.html',
+                      {'default_formats':default_formats})
 
 @check_project
 def view_project(request, project, access=None):

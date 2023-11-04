@@ -1,0 +1,15 @@
+{% extends "base/base.html" %}
+
+{% block content %}
+    <form action="/projects/create/" method="post">
+    {% csrf_token %}
+        <h3>Name your project: <input type="text" id="projectname" name="projectname"></h3>
+        <h3>Choose a standard format:
+        <select id="format" name="format">
+        {% for f in default_formats %}
+            <option value="{{ f }}">{{ f }}</option>
+        {% endfor %}
+        </select></h3>
+        <input type="submit" value="Create Project">
+    </form>
+{% endblock %}
