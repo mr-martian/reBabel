@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand, CommandError
 from app.models import Project, ProjectView, User
-from app.views import API_URL, post
+
 
 DATA = {
     'flex': {
